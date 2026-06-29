@@ -268,14 +268,15 @@ JOMA_CARDS_JS = """
 """
 
 
-FRAGRANCE_KEYWORDS = re.compile(
-    r"\b(eau\s+de|edt|edp|edc|extrait|parfum|cologne|perfume|fragrance"
-    r"|spray|\d+\s*ml|\d+\s*oz)\b", re.I
+NON_FRAGRANCE = re.compile(
+    r"\b(watch|watches|chronograph|timepiece|quartz|automatic"
+    r"|sunglass|sunglasses|eyeglass|eyeglasses|spectacles|frames"
+    r"|wallet|belt|handbag|purse|scarf|jewel|bracelet|necklace|ring)\b", re.I
 )
 
-def _is_fragrance(text: str) -> bool:
-    """Return True if the text looks like a fragrance product."""
-    return bool(FRAGRANCE_KEYWORDS.search(text or ""))
+def _is_non_fragrance(text: str) -> bool:
+    """Return True if the product is clearly NOT a fragrance (watch, glasses, etc.)."""
+    return bool(NON_FRAGRANCE.search(text or ""))
 
 
 JOMA_PRODUCT_SIZE_JS = r"""
@@ -333,7 +334,7 @@ async def scrape_jomashop(page, brand, name) -> list:
         hay = f"{c['brand']} {c['name']}".lower()
         if qwords and sum(1 for w in qwords if w in hay) < max(1, len(qwords) // 2):
             continue
-        if not _is_fragrance(c["name"]):
+        if _is_non_fragrance(c["name"]):
             continue
         sale = clean_price(c.get("sale"))
         orig = clean_price(c.get("orig")) or sale

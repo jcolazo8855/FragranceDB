@@ -265,6 +265,31 @@ def _is_fragrance(text: str) -> bool:
     return bool(FRAGRANCE_KEYWORDS.search(text or ""))
 
 
+JOMA_PRODUCT_SIZE_JS = r"""
+    () => {
+        const body = document.body.innerText;
+        // Look for explicit size mentions on product page
+        const patterns = [
+            /(\d+(?:\.\d+)?)\s*ml/i,
+            /(\d+(?:\.\d+)?)\s*fl\.?\s*oz/i,
+            /(\d+(?:\.\d+)?)\s*oz/i,
+        ];
+        for (const pat of patterns) {
+            const m = body.match(pat);
+            if (m) return m[0];
+        }
+        return '';
+    }
+"""
+
+async def _jomashop_size_from_page(page, prod_url: str) -> float | None:
+    """Visit the product page to extract size when the search card didn't have one."""
+    if not await goto(page, prod_url, 3000):
+        return None
+    raw = await page.evaluate(JOMA_PRODUCT_SIZE_JS)
+    return size_to_ml(raw) if raw else None
+
+
 async def scrape_jomashop(page, brand, name) -> list:
     q = quote_plus(f"{brand} {name}".strip())
     # Use the fragrance category filter to avoid watches/sunglasses
@@ -286,6 +311,10 @@ async def scrape_jomashop(page, brand, name) -> list:
         ml   = size_to_ml(c["name"])
         href = c.get("href", "")
         prod_url = href if href.startswith("http") else urljoin("https://www.jomashop.com", href)
+        # If size missing from card, visit the product page to find it
+        if ml is None and prod_url:
+            ml = await _jomashop_size_from_page(page, prod_url)
+            # Navigate back to results isn't needed — we store and continue
         offers.append({
             "retailer": "Jomashop", "input_brand": brand, "input_name": name,
             "variant_title": c["name"], "size_ml": ml,

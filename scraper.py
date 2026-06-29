@@ -320,20 +320,53 @@ async def _jomashop_size_from_page(page, prod_url: str) -> float | None:
     return size_to_ml(raw) if raw else None
 
 
-async def scrape_jomashop(page, brand, name) -> list:
-    q = quote_plus(f"{brand} {name}".strip())
-    # Use the fragrance category filter to avoid watches/sunglasses
+async def _jomashop_search(page, query: str) -> list:
+    """Load one Jomashop search page, scrolling until no new cards appear."""
+    q = quote_plus(query)
     url = f"https://www.jomashop.com/search?q={q}&category=fragrance"
     if not await goto(page, url, 3500):
         return []
     await dismiss_popup(page)
-    cards = await page.evaluate(JOMA_CARDS_JS)
+    # Scroll in a loop to trigger infinite-scroll / lazy loading
+    prev = 0
+    for _ in range(8):
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await page.wait_for_timeout(1100)
+        cards = await page.evaluate(JOMA_CARDS_JS)
+        if len(cards) == prev:
+            break
+        prev = len(cards)
+    return await page.evaluate(JOMA_CARDS_JS)
+
+
+async def scrape_jomashop(page, brand, name) -> list:
+    # Phase 1: specific search (brand + name when name is given; brand-only otherwise)
+    full_q = f"{brand} {name}".strip()
+    cards = await _jomashop_search(page, full_q)
+
+    # Phase 2: if the specific search returned few cards AND a name was given,
+    # also try brand-only — Jomashop's ranking sometimes buries specific titles.
+    if name and len(cards) < 10:
+        brand_cards = await _jomashop_search(page, brand)
+        # Merge: add cards whose URL isn't already present
+        seen_hrefs = {c["href"] for c in cards}
+        cards += [c for c in brand_cards if c["href"] not in seen_hrefs]
+
     offers = []
+    seen_urls: set[str] = set()
+    # Match words from BOTH brand and name so that brand-only cards still pass the filter
     qwords = set(re.sub(r"[^a-z0-9 ]", " ", f"{brand} {name}".lower()).split())
+    brand_words = set(re.sub(r"[^a-z0-9 ]", " ", brand.lower()).split())
+
     for c in cards:
         hay = f"{c['brand']} {c['name']}".lower()
-        if qwords and sum(1 for w in qwords if w in hay) < max(1, len(qwords) // 2):
-            continue
+        # Require at least half of the full query words to appear in the card text,
+        # OR (for brand-only cards) at least all brand words.
+        full_match = sum(1 for w in qwords if w in hay)
+        if full_match < max(1, len(qwords) // 2):
+            # Allow pure brand match so brand-only fallback cards aren't dropped
+            if not all(w in hay for w in brand_words):
+                continue
         if _is_non_fragrance(c["name"]):
             continue
         sale = clean_price(c.get("sale"))
@@ -341,10 +374,12 @@ async def scrape_jomashop(page, brand, name) -> list:
         ml   = size_to_ml(c["name"])
         href = c.get("href", "")
         prod_url = href if href.startswith("http") else urljoin("https://www.jomashop.com", href)
+        if prod_url in seen_urls:
+            continue
+        seen_urls.add(prod_url)
         # If size missing from card, visit the product page to find it
         if ml is None and prod_url:
             ml = await _jomashop_size_from_page(page, prod_url)
-            # Navigate back to results isn't needed — we store and continue
         offers.append({
             "retailer": "Jomashop", "input_brand": brand, "input_name": name,
             "variant_title": c["name"], "size_ml": ml,

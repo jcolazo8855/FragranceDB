@@ -115,10 +115,23 @@ def clean_price(raw):
 
 
 def size_to_ml(text: str):
+    if not text:
+        return None
+    # Multi-piece sets: "2 x 75 ml", "75ml x 2", "3 x 1.7 oz" → total volume
+    m = re.search(r"(\d+)\s*[xX]\s*(\d+(?:\.\d+)?)\s*ml", text, re.I)
+    if m:
+        return round(int(m.group(1)) * float(m.group(2)), 1)
+    m = re.search(r"(\d+(?:\.\d+)?)\s*ml\s*[xX]\s*(\d+)", text, re.I)
+    if m:
+        return round(float(m.group(1)) * int(m.group(2)), 1)
+    m = re.search(r"(\d+)\s*[xX]\s*(\d+(?:\.\d+)?)\s*(?:fl\.?\s*)?oz", text, re.I)
+    if m:
+        return round(int(m.group(1)) * float(m.group(2)) * 29.5735, 1)
+    # Single sizes
     m = re.search(r"(\d+(?:\.\d+)?)\s*ml", text, re.I)
     if m:
         return float(m.group(1))
-    m = re.search(r"(\d+(?:\.\d+)?)\s*oz", text, re.I)
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:fl\.?\s*)?oz", text, re.I)
     if m:
         return round(float(m.group(1)) * 29.5735, 1)
     return None
@@ -267,15 +280,31 @@ def _is_fragrance(text: str) -> bool:
 
 JOMA_PRODUCT_SIZE_JS = r"""
     () => {
+        // 1. JSON-LD description (most reliable)
+        const lds = [...document.querySelectorAll('script[type="application/ld+json"]')]
+            .map(s => { try { return JSON.parse(s.innerText); } catch(e) { return null; } })
+            .filter(Boolean);
+        const desc = (lds.find(o => o.description || o.name) || {});
+        const descText = (desc.description || '') + ' ' + (desc.name || '');
+
+        // 2. Spec / detail tables (often have "Volume: 100 ml")
+        const specText = [...document.querySelectorAll(
+            'table td, [class*="spec"] td, [class*="detail"] td, [class*="attribute"]'
+        )].map(e => e.innerText).join(' ');
+
+        // 3. Full body text as last resort
         const body = document.body.innerText;
-        // Look for explicit size mentions on product page
+
+        const candidate = descText + ' ' + specText + ' ' + body;
         const patterns = [
-            /(\d+(?:\.\d+)?)\s*ml/i,
-            /(\d+(?:\.\d+)?)\s*fl\.?\s*oz/i,
-            /(\d+(?:\.\d+)?)\s*oz/i,
+            /\d+\s*[xX]\s*\d+(?:\.\d+)?\s*ml/i,
+            /\d+(?:\.\d+)?\s*ml\s*[xX]\s*\d+/i,
+            /\d+\s*[xX]\s*\d+(?:\.\d+)?\s*(?:fl\.?\s*)?oz/i,
+            /\d+(?:\.\d+)?\s*ml/i,
+            /\d+(?:\.\d+)?\s*(?:fl\.?\s*)?oz/i,
         ];
         for (const pat of patterns) {
-            const m = body.match(pat);
+            const m = candidate.match(pat);
             if (m) return m[0];
         }
         return '';
@@ -932,7 +961,13 @@ async def scrape_one(page, conn, source: str, brand: str, name: str,
     for off in offers:
         if db.insert_offer(conn, off, fid) > 0:
             stored += 1
-    # If no offers but we enriched, the fragrance row still persists.
+
+    # 4. Back-fill size_ml for offers that still have none, using the most
+    #    common known size for this fragrance as a best-guess estimate.
+    inferred = db.infer_missing_sizes(conn, fid)
+    if inferred:
+        print(f"    inferred size for {inferred} offer(s) from sibling offers")
+
     print(f"    stored {stored} offers under fragrance_id={fid}")
     return stored
 

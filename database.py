@@ -355,6 +355,30 @@ def all_notes(conn: sqlite3.Connection) -> list:
     return sorted(notes)
 
 
+def infer_missing_sizes(conn: sqlite3.Connection, fragrance_id: int) -> int:
+    """
+    For offers under `fragrance_id` that have a price but no size_ml,
+    infer the size from the most common known size for that same fragrance.
+    Returns the number of rows updated.
+    """
+    known = conn.execute(
+        "SELECT size_ml FROM offers WHERE fragrance_id = ? AND size_ml IS NOT NULL "
+        "GROUP BY size_ml ORDER BY COUNT(*) DESC LIMIT 1",
+        (fragrance_id,)
+    ).fetchone()
+    if not known:
+        return 0
+    inferred_ml = known[0]
+    cur = conn.execute(
+        "UPDATE offers SET size_ml = ?, size_oz = ?, price_per_ml = "
+        "  CASE WHEN sale_price IS NOT NULL THEN ROUND(sale_price / ?, 4) ELSE NULL END "
+        "WHERE fragrance_id = ? AND size_ml IS NULL AND sale_price IS NOT NULL",
+        (inferred_ml, round(inferred_ml / 29.5735, 2), inferred_ml, fragrance_id)
+    )
+    conn.commit()
+    return cur.rowcount
+
+
 def stats(conn: sqlite3.Connection) -> dict:
     return {
         "fragrances": conn.execute("SELECT COUNT(*) FROM fragrances").fetchone()[0],

@@ -78,7 +78,7 @@ st.divider()
 
 with st.sidebar:
     st.header("➕ Scrape new data")
-    src   = st.selectbox("Retailer source", ["all", "luckyscent", "jomashop", "fragrancenet"])
+    src   = st.selectbox("Retailer source", ["all", "luckyscent", "jomashop", "sephora", "ulta"])
     sb    = st.text_input("House / Brand", placeholder="Profumum Roma")
     sn    = st.text_input("Fragrance (optional)", placeholder="Olibanum")
     enr   = st.checkbox("Enrich (Parfumo + Fragrantica)", value=True)
@@ -92,13 +92,29 @@ with st.sidebar:
                 cmd += ["--name", sn.strip()]
             if not enr:
                 cmd += ["--no-enrich"]
-            st.info("A Chrome window will open. Watch the terminal for progress. "
-                    "Refresh this page when it finishes.")
             st.code(" ".join(cmd))
             try:
-                subprocess.Popen(cmd, cwd=APP_DIR)
+                with st.spinner("Scraping... a Chrome window will open. Don't click inside it."):
+                    result = subprocess.run(
+                        cmd, cwd=APP_DIR, capture_output=True, text=True,
+                        timeout=600, encoding="utf-8", errors="replace",
+                    )
+                if result.returncode == 0:
+                    st.success("Scrape finished. Results are shown below.")
+                    if result.stdout:
+                        st.text(result.stdout[-3000:])
+                    st.cache_resource.clear()
+                    st.rerun()
+                else:
+                    st.error("Scraper exited with an error.")
+                    if result.stderr:
+                        st.code(result.stderr[-3000:])
+                    if result.stdout:
+                        st.text(result.stdout[-3000:])
+            except subprocess.TimeoutExpired:
+                st.error("Scrape timed out after 10 minutes.")
             except Exception as e:
-                st.error(f"Could not launch scraper: {e}\nRun manually:\n{' '.join(cmd)}")
+                st.error(f"Could not launch scraper: {e}")
 
     st.divider()
     st.header("🔎 Filters")

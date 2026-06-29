@@ -415,10 +415,227 @@ async def scrape_luckyscent(page, brand, name) -> list:
     return offers
 
 
+async def scrape_sephora(page, brand, name) -> list:
+    """Search Sephora and scrape matching product pages."""
+    q = quote_plus(f"{brand} {name}".strip())
+    if not await goto(page, f"https://www.sephora.com/search?keyword={q}", 7000):
+        return []
+    await dismiss_popup(page)
+    # Sephora is a heavy SPA — scroll to trigger lazy render
+    for _ in range(2):
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await page.wait_for_timeout(1500)
+    links = await page.evaluate("""
+        () => [...new Set([...document.querySelectorAll('a[href*="/product/"]')]
+            .map(a => a.href).filter(h => h.includes('sephora.com/product/')))]
+            .slice(0, 20)
+    """)
+    nwords = set(re.sub(r"[^a-z0-9 ]", " ", (brand + " " + name).lower()).split())
+    offers = []
+    for url in links:
+        url = url.split("?")[0]
+        if not await goto(page, url, 5000):
+            continue
+        await dismiss_popup(page)
+        d = await page.evaluate(r"""
+            () => {
+                const out = {url: window.location.href};
+                // JSON-LD is the most reliable source
+                const lds = [...document.querySelectorAll('script[type="application/ld+json"]')]
+                    .map(s => { try { return JSON.parse(s.innerText); } catch(e) { return null; } })
+                    .filter(Boolean);
+                const prod = lds.find(o => o['@type'] === 'Product') || {};
+                out.name  = prod.name  || document.querySelector('h1')?.innerText?.trim() || '';
+                out.brand = prod.brand?.name || '';
+                out.image = (prod.image || [null])[0] || '';
+                // Offers from JSON-LD
+                const rawOffers = Array.isArray(prod.offers) ? prod.offers
+                    : prod.offers ? [prod.offers] : [];
+                out.jsonOffers = rawOffers.map(o => ({
+                    price: parseFloat(o.price) || null,
+                    size:  o.name || '',
+                    avail: (o.availability || '').includes('InStock'),
+                }));
+                // Fallback: grab displayed price
+                const priceEl = document.querySelector(
+                    '[data-comp*="Price"] [class*="price"], [class*="css-0"] b, [class*="Price__value"]'
+                );
+                out.fallbackPrice = priceEl ? priceEl.innerText.trim() : '';
+                // Size options from select/buttons
+                out.sizeOptions = [...document.querySelectorAll(
+                    '[data-comp*="Size"] button, [class*="swatch"] button, select option'
+                )].map(e => (e.innerText || e.value || '').trim())
+                 .filter(t => /\d+(\.\d+)?\s*(ml|oz)/i.test(t));
+                return out;
+            }
+        """)
+        title = d.get("name", "")
+        hay = title.lower()
+        if nwords and sum(1 for w in nwords if w in hay) < max(1, len(nwords) // 2):
+            continue
+        json_offers = d.get("jsonOffers") or []
+        if json_offers:
+            for jo in json_offers:
+                price = jo.get("price")
+                if not price:
+                    continue
+                ml = size_to_ml(jo.get("size", "") + " " + title)
+                offers.append({
+                    "retailer": "Sephora", "input_brand": brand, "input_name": name,
+                    "variant_title": title, "size_ml": ml,
+                    "size_oz": round(ml / 29.5735, 2) if ml else None,
+                    "original_price": price, "sale_price": price, "discount_pct": None,
+                    "price_per_ml": ppm(price, ml), "in_stock": jo.get("avail", True),
+                    "product_url": d.get("url", url),
+                    "image_url": (d.get("image") or "").split("?")[0],
+                })
+        else:
+            price = clean_price(d.get("fallbackPrice"))
+            if not price:
+                continue
+            ml = size_to_ml(title)
+            # Try size options for additional sizes
+            sizes = d.get("sizeOptions") or [title]
+            seen_ml = set()
+            for sz in sizes:
+                ml = size_to_ml(sz) or size_to_ml(title)
+                if ml in seen_ml:
+                    continue
+                seen_ml.add(ml)
+                offers.append({
+                    "retailer": "Sephora", "input_brand": brand, "input_name": name,
+                    "variant_title": title, "size_ml": ml,
+                    "size_oz": round(ml / 29.5735, 2) if ml else None,
+                    "original_price": price, "sale_price": price, "discount_pct": None,
+                    "price_per_ml": ppm(price, ml), "in_stock": True,
+                    "product_url": d.get("url", url),
+                    "image_url": (d.get("image") or "").split("?")[0],
+                })
+    return offers
+
+
+async def scrape_ulta(page, brand, name) -> list:
+    """Scrape Ulta brand page (fragrance category) for matching products."""
+    slug = re.sub(r"[^a-z0-9]+", "-", brand.lower()).strip("-")
+    if not await goto(page, f"https://www.ulta.com/brand/{slug}?category=fragrance", 5000):
+        return []
+    # Check for valid brand page
+    body_check = await page.evaluate("() => document.body.innerText")
+    if "page not found" in body_check.lower() or "no results" in body_check.lower():
+        return []
+    # Scroll to load lazy products
+    for _ in range(4):
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await page.wait_for_timeout(800)
+    links = await page.evaluate("""
+        () => [...new Set([...document.querySelectorAll('a[href*="/p/"]')]
+            .map(a => a.href).filter(h => h.includes('ulta.com/p/')))]
+    """)
+    nwords = set(re.sub(r"[^a-z0-9 ]", " ", name.lower()).split())
+    offers = []
+    for url in links:
+        base_url = url.split("?")[0]
+        if not await goto(page, url, 5000):
+            continue
+        d = await page.evaluate(r"""
+            () => {
+                const out = {url: window.location.href};
+                // JSON-LD product info (name contains size, e.g. "Eros EDP - 3.4 oz")
+                const lds = [...document.querySelectorAll('script[type="application/ld+json"]')]
+                    .map(s => { try { return JSON.parse(s.innerText); } catch(e) { return null; } })
+                    .filter(Boolean);
+                const prod = lds.find(o => o['@type'] === 'Product') || {};
+                out.name  = prod.name  || document.querySelector('h1')?.innerText?.trim() || '';
+                out.brand = prod.brand || '';
+                out.image = prod.image || '';
+                // Prices: filter to plausible fragrance prices ($15-$600)
+                const allPrices = [...document.querySelectorAll('[class*="pal-c-Text"]')]
+                    .map(e => (e.innerText||'').trim())
+                    .filter(t => /^\$[\d,.]+$/.test(t))
+                    .map(t => parseFloat(t.replace(/[$,]/g,'')))
+                    .filter(p => p >= 15 && p <= 600);
+                out.prices = [...new Set(allPrices)];
+                // Size variant links (same product, different SKU)
+                out.skuLinks = [...new Set([...document.querySelectorAll('a[href*="/p/"][href*="?sku="]')]
+                    .map(a => a.href))].slice(0, 20);
+                // In-stock check
+                out.inStock = !/out of stock|sold out/i.test(document.body.innerText);
+                return out;
+            }
+        """)
+        title = d.get("name", "")
+        hay = title.lower() + " " + (d.get("brand") or "").lower()
+        if nwords and sum(1 for w in nwords if w in hay) < max(1, len(nwords) // 2):
+            continue
+        prices = d.get("prices") or []
+        if not prices:
+            continue
+        sale = prices[0]  # first price = displayed/default price
+        ml = size_to_ml(title)  # JSON-LD name includes size e.g. "... - 3.4 oz"
+        img = (d.get("image") or "").split("?")[0]
+
+        # Visit each size SKU to get per-size price
+        sku_links = d.get("skuLinks") or []
+        if sku_links:
+            seen_sku = set()
+            for sku_url in [url] + sku_links:
+                sku_key = sku_url.split("sku=")[-1]
+                if sku_key in seen_sku:
+                    continue
+                seen_sku.add(sku_key)
+                if sku_url != url:
+                    if not await goto(page, sku_url, 4000):
+                        continue
+                sku_d = await page.evaluate(r"""
+                    () => {
+                        const lds = [...document.querySelectorAll('script[type="application/ld+json"]')]
+                            .map(s => { try { return JSON.parse(s.innerText); } catch(e) { return null; } })
+                            .filter(Boolean);
+                        const prod = lds.find(o => o['@type'] === 'Product') || {};
+                        const allPrices = [...document.querySelectorAll('[class*="pal-c-Text"]')]
+                            .map(e => (e.innerText||'').trim())
+                            .filter(t => /^\$[\d,.]+$/.test(t))
+                            .map(t => parseFloat(t.replace(/[$,]/g,'')))
+                            .filter(p => p >= 15 && p <= 600);
+                        return {
+                            name: prod.name || '',
+                            price: allPrices[0] || null,
+                            inStock: !/out of stock|sold out/i.test(document.body.innerText),
+                            url: window.location.href,
+                        };
+                    }
+                """)
+                sku_price = sku_d.get("price")
+                sku_name  = sku_d.get("name") or title
+                sku_ml    = size_to_ml(sku_name)
+                if not sku_price:
+                    continue
+                offers.append({
+                    "retailer": "Ulta", "input_brand": brand, "input_name": name,
+                    "variant_title": sku_name, "size_ml": sku_ml,
+                    "size_oz": round(sku_ml / 29.5735, 2) if sku_ml else None,
+                    "original_price": sku_price, "sale_price": sku_price, "discount_pct": None,
+                    "price_per_ml": ppm(sku_price, sku_ml),
+                    "in_stock": sku_d.get("inStock", True),
+                    "product_url": sku_d.get("url", sku_url), "image_url": img,
+                })
+        else:
+            offers.append({
+                "retailer": "Ulta", "input_brand": brand, "input_name": name,
+                "variant_title": title, "size_ml": ml,
+                "size_oz": round(ml / 29.5735, 2) if ml else None,
+                "original_price": sale, "sale_price": sale, "discount_pct": None,
+                "price_per_ml": ppm(sale, ml), "in_stock": d.get("inStock", True),
+                "product_url": d.get("url", url), "image_url": img,
+            })
+    return offers
+
+
 RETAILERS = {
-    "jomashop":     scrape_jomashop,
-    "fragrancenet": scrape_fragrancenet,
-    "luckyscent":   scrape_luckyscent,
+    "jomashop":   scrape_jomashop,
+    "luckyscent": scrape_luckyscent,
+    "sephora":    scrape_sephora,
+    "ulta":       scrape_ulta,
 }
 
 

@@ -255,9 +255,21 @@ JOMA_CARDS_JS = """
 """
 
 
+FRAGRANCE_KEYWORDS = re.compile(
+    r"\b(eau\s+de|edt|edp|edc|extrait|parfum|cologne|perfume|fragrance"
+    r"|spray|\d+\s*ml|\d+\s*oz)\b", re.I
+)
+
+def _is_fragrance(text: str) -> bool:
+    """Return True if the text looks like a fragrance product."""
+    return bool(FRAGRANCE_KEYWORDS.search(text or ""))
+
+
 async def scrape_jomashop(page, brand, name) -> list:
     q = quote_plus(f"{brand} {name}".strip())
-    if not await goto(page, f"https://www.jomashop.com/search?q={q}", 3500):
+    # Use the fragrance category filter to avoid watches/sunglasses
+    url = f"https://www.jomashop.com/search?q={q}&category=fragrance"
+    if not await goto(page, url, 3500):
         return []
     await dismiss_popup(page)
     cards = await page.evaluate(JOMA_CARDS_JS)
@@ -265,14 +277,15 @@ async def scrape_jomashop(page, brand, name) -> list:
     qwords = set(re.sub(r"[^a-z0-9 ]", " ", f"{brand} {name}".lower()).split())
     for c in cards:
         hay = f"{c['brand']} {c['name']}".lower()
-        # require at least half the query words to appear
         if qwords and sum(1 for w in qwords if w in hay) < max(1, len(qwords) // 2):
+            continue
+        if not _is_fragrance(c["name"]):
             continue
         sale = clean_price(c.get("sale"))
         orig = clean_price(c.get("orig")) or sale
         ml   = size_to_ml(c["name"])
         href = c.get("href", "")
-        url  = href if href.startswith("http") else urljoin("https://www.jomashop.com", href)
+        prod_url = href if href.startswith("http") else urljoin("https://www.jomashop.com", href)
         offers.append({
             "retailer": "Jomashop", "input_brand": brand, "input_name": name,
             "variant_title": c["name"], "size_ml": ml,
@@ -280,7 +293,7 @@ async def scrape_jomashop(page, brand, name) -> list:
             "original_price": orig, "sale_price": sale,
             "discount_pct": round((orig - sale) / orig * 100) if (orig and sale and orig > sale) else None,
             "price_per_ml": ppm(sale, ml), "in_stock": bool(sale),
-            "product_url": url, "image_url": (c.get("img") or "").split("?")[0],
+            "product_url": prod_url, "image_url": (c.get("img") or "").split("?")[0],
         })
     return offers
 

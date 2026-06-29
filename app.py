@@ -187,8 +187,27 @@ display_cols = [c for c in [
 
 st.subheader(f"📋 {len(df)} offers")
 
+# Mark the best $/ml row for each unique fragrance (brand + name)
+if "price_per_ml" in df.columns:
+    best_idx = (
+        df[df["price_per_ml"].notna()]
+        .groupby(["brand", "name"])["price_per_ml"]
+        .idxmin()
+    )
+    best_set = set(best_idx.values)
+else:
+    best_set = set()
+
+def _highlight_best(row):
+    if row.name in best_set and pd.notna(row.get("price_per_ml")):
+        return ["background-color: #c6f0c2; font-weight: bold"
+                if col == "price_per_ml" else "" for col in row.index]
+    return [""] * len(row.index)
+
+styled = df[display_cols].style.apply(_highlight_best, axis=1)
+
 st.dataframe(
-    df[display_cols],
+    styled,
     use_container_width=True, hide_index=True, height=560,
     column_config={
         "price_per_ml": st.column_config.NumberColumn("$/ml", format="$%.2f"),

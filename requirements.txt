@@ -1,0 +1,4 @@
+playwright
+streamlit
+pandas
+openpyxl
